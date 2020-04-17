@@ -10,7 +10,60 @@ use structopt::StructOpt;
 use std::path::PathBuf;
 use chrono::{DateTime, Local};
 use std::collections::{HashSet, HashMap, BTreeMap};
-use std::iter::FromIterator;
+
+
+#[derive(StructOpt)]
+#[structopt(name = "Madl",
+about = "Measure laboratory ")]
+pub struct Cli {
+    /// Number of test stand
+    #[structopt(
+        //short = "c",
+        //long = "cell",
+        help="Test cell number")]
+    pub cell: u8,
+
+    /// Define test setup
+    #[structopt(short = "d",
+        long = "define",
+        help="Define TR parameters")
+    ]
+    pub define: bool,
+
+    /// Start of test duration measurement
+    #[structopt(short = "s",
+        long = "start",
+        help="Start of test duration measurement")
+    ]
+    pub start: bool,
+
+    /// End of test duration measurement
+    #[structopt(short = "e",
+        long = "end",
+        help="End of test duration measurement")
+    ]
+    pub end: bool,
+}
+
+pub enum Laststate {
+    IN(Vec<String>),
+    OUT(Vec<String>),
+    EMPTY,
+}
+
+pub fn check_state(output: &HashMap<&str, String>) -> Result<Laststate, Box<dyn Error>> {
+    let last_line = match output.get(&"last_line") {
+        Some(text) => text,
+        None => panic!("Not defined last line in Output HashMap!"),
+    };
+    let state_vec: Vec<String> = last_line.trim().split("::").map(String::from).collect();
+    println!("Check_state: {:?}", state_vec);
+    match state_vec[0].as_ref() {
+        "IN" => return Ok(Laststate::IN(state_vec[2..].to_vec())),
+        "OUT" => return Ok(Laststate::OUT(state_vec[2..].to_vec())),
+        _ => return Ok(Laststate::EMPTY),
+    }
+}
 
 /// Read config file
 pub fn read_config(path: &PathBuf) -> Result<String, Box<dyn Error>> {
@@ -29,8 +82,108 @@ pub fn parse_config(raw_string: &str) -> Vec<Vec<String>> {
     main_vec
 }
 
+pub fn get_log_data(fpath: path::PathBuf, mut output: HashMap<&str, String>) -> Result<HashMap<&str, String>, Box<dyn Error>> {
+    println!("file path for output: {:?}", fpath);
+    let mut keys: HashSet<&str> = output.keys().map(|e| *e).collect();
+    let contents = read_config(&fpath)?;
+
+    for (l, line) in contents.lines().rev().enumerate() {
+        println!("{}", &line);
+        if l == 0 {
+            let _val = output.insert(&"last_line", line.to_string());
+        }
+
+        let linevec: Vec<&str> = line.trim().split("::").collect();
+        //let mut key: &str = "";
+        match keys.take(linevec[0]) {
+            Some(key) => {let _result: Option<String> = output.insert(key, linevec[1].to_string());},
+            None => continue,
+        }
+        //output.insert(key, linevec[1].to_string());
+        if keys.is_empty() {
+            break
+        }
+    }
+    Ok(output)
+}
+
+fn last_modified_log(current_dir: &path::PathBuf) -> Result<path::PathBuf, Box<dyn Error>> {
+    println!(
+        "Entries modified in the last 24 hours in {:?}:",
+        current_dir
+    );
+    let mut out: path::PathBuf = path::PathBuf::new();
+    let mut timediff: Option<u64> = None;
+
+    for entry in fs::read_dir(current_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        let metadata = fs::metadata(&path)?;
+        let last_modified = metadata.modified()?.elapsed()?.as_secs();
+
+        match timediff {
+            Some(diff) => if {last_modified < diff} && metadata.is_file() {
+                out = path.to_path_buf();
+                timediff = Some(last_modified);
+            },
+            None => {
+                timediff = Some(last_modified);
+                out = path.to_path_buf();
+            },
+        }
+    }
+
+    Ok(out)
+}
+
+pub fn init_output<'a>(config: &Config, output: HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
+    let dirpath = config.get_log_dir_path();
+    match last_modified_log(&dirpath) {
+        Ok(file_path) => {
+            let output = get_log_data(file_path, output)?;
+            return Ok(output);
+        },
+        Err(e) => {
+            println!("Empty dir or no file: {:?}\nError {:?}", &dirpath, e);
+            return Ok(output);
+        },
+    }
+}
+
+fn format_output(output: &HashMap<&str, String>) -> String {
+
+    let text = format!("\
+MADL_Version::2.5
+InterlockStatus::Enabled
+TR_Number::{}
+Specimen ID::{}
+Test Request type::{}
+Testing_Category::{}
+Technician::{}
+Available Time::{}\n",
+    output[&"TR_Number"], output[&"Specimen ID"], output[&"Test Request type"],
+    output[&"Testing_Category"], output[&"Technician"], output[&"Available Time"]);
+
+    text
+}
+
+// Write TR specification and start time of testing.
+pub fn start_of_test(config: &Config, output: &HashMap<&str, String>) -> Result<(), Box<dyn Error>> {
+
+    let mut text = format_output(&output);
+    let local: DateTime<Local> = Local::now();
+    let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
+    let text_time = format!("IN::{}::Test Start\n", date_string);
+    text.push_str(&text_time);
+
+    let filename = config.get_log_file_path(local)?;
+    append_file(filename, text)?;
+
+    Ok(())
+}
+
 struct TestInfo {
-    pub cfg_file: path::PathBuf,
     pub values: Vec<String>,
 }
 
@@ -40,7 +193,7 @@ impl TestInfo {
         let data = &parse_config(&config_str);
         let out: Vec<String> = data[0].to_owned();
 
-        Ok(TestInfo{cfg_file: path.to_owned(), values: out})
+        Ok(TestInfo{values: out})
     }
 
     pub fn choose_value(&self) -> Result<String, Box<dyn Error>> {
@@ -67,7 +220,6 @@ impl fmt::Display for TestInfo {
 }
 
 struct TestCategory {
-    cfg_file: path::PathBuf,
     values: BTreeMap<String, String>,
 }
 
@@ -84,7 +236,7 @@ impl TestCategory {
             out.insert(key, element);
         }
 
-        Ok(TestCategory{cfg_file: path.to_owned(), values: out})
+        Ok(TestCategory{values: out})
     }
 
     pub fn choose_value(&self) -> Result<(&String, &String), Box<dyn Error>> {
@@ -112,7 +264,6 @@ impl fmt::Display for TestCategory {
 }
 
 struct TestLossClass {
-    cfg_file: path::PathBuf,
     values: BTreeMap<String, BTreeMap<String, Vec<String>>>,
 }
 
@@ -130,7 +281,7 @@ impl TestLossClass {
             level0.push(line[2].clone());
         }
 
-        Ok(TestLossClass{cfg_file: path.to_owned(), values: level2})
+        Ok(TestLossClass{values: level2})
     }
 
     pub fn display_enumer(&self, values: &Vec<String>) -> () {
@@ -152,24 +303,20 @@ impl TestLossClass {
     }
 
     pub fn choose_value(&self) -> Result<Vec<String>, Box<dyn Error>> {
-        let mut out: Vec<String> = Vec::new();
-        println!("Choose classification:");
+        println!("\nChoose classification:");
         let firstlevel: Vec<String> = self.values.keys().cloned().collect();
         let first = self.read_input(&firstlevel)?;
 
-        println!("Choose sub-classification:");
+        println!("\nChoose sub-classification:");
         let secondlevelval = self.values.get(&first).unwrap();
         let secondlevel: Vec<String> = secondlevelval.keys().cloned().collect();
         let second = self.read_input(&secondlevel)?;
 
-        println!("Choose sub-classification:");
+        println!("\nChoose sub-classification:");
         let thirdlevel = secondlevelval.get(&second).unwrap();
         let third = self.read_input(&thirdlevel)?;
 
-        out.push(first);
-        out.push(second);
-        out.push(third);
-
+        let out = vec!(first, second, third);
         Ok(out)
     }
 }
@@ -216,7 +363,7 @@ impl Config {
             .join(conf_file)
     }
 
-    fn get_log_dir_path(&self) -> path::PathBuf {
+    pub fn get_log_dir_path(&self) -> path::PathBuf {
         self.settings_dir
             .join(&self.teststand_dir)
             .join(&self.log_dir)
@@ -226,93 +373,48 @@ impl Config {
     // let local: DateTime<Local> = Local::now();
     pub fn get_log_file_path(&self, date: DateTime<Local>) -> Result<path::PathBuf, Box<dyn Error>> {
         let dir_path = self.get_log_dir_path();
-        let test_bench_id_config_str = read_config(&self.test_bench_id_cfg)?;
+        let config_path = self.get_config_file_path(&self.test_bench_id_cfg);
+        let test_bench_id_config_str = read_config(&config_path)?;
         let test_bench_id = &parse_config(&test_bench_id_config_str)[0][0];
 
         let date_string = date.format("%d%m%y").to_string();
 
         let filename = format!("{}_{}.txt", test_bench_id, date_string);
         let log_file_path = dir_path.join(filename);
-        println!("Log file path: {}", date_string);
+        println!("Log file path: {:?}", log_file_path);
         Ok(log_file_path)
     }
 }
 
-fn pub get_log_data(fpath: path::PathBuf, mut output: HashMap<&str, String>) -> Result<HashMap<&str, String>, Box<dyn Error>> {
-    let mut keys: HashSet<&str> = output.keys().map(|e| *e).collect();
-    println!("Reading config: {:?}", fpath);
-    let mut f = File::open(fpath).unwrap();
-    let mut contents = String::new();
-    f.read_to_string(&mut contents)?;
-
-    for line in contents.lines().rev() {
-        let linevec: Vec<&str> = line.trim().split("::").collect();
-        let key: &str = keys.take(linevec[0]).unwrap();
-        output.insert(key, linevec[1].to_string());
-        if keys.is_empty() {
-            break
-        }
-    }
-    Ok(output)
-}
-
-fn last_mod_log(current_dir: path::PathBuf) -> Result<path::PathBuf, Box<dyn Error>> {
-    println!(
-        "Entries modified in the last 24 hours in {:?}:",
-        current_dir
-    );
-    let mut out: path::PathBuf = path::PathBuf::new();
-
-    for entry in fs::read_dir(current_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        let metadata = fs::metadata(&path)?;
-        let last_modified = metadata.modified()?.elapsed()?.as_secs();
-
-        if last_modified < 24 * 3600 && metadata.is_file() {
-            println!(
-                "Last modified: {:?} seconds, filename: {:?}",
-                last_modified,
-                path.file_name().ok_or("No filename")?
-            );
-            out.push(path.to_path_buf());
-            break
-        }
-    }
-
-    Ok(out)
-}
-
-pub struct Output {
-    pub tr_number: String,
-    pub specimen_id: String,
-    pub request_type: String,
-    pub test_category: String,
-    pub operator: String,
-    pub InterlockStatus: bool,
-    pub avalaible_time: u8,
-    pub test_state: String,
-    pub stop_reason: String,
-    pub comments: String,
-    pub classification: String,
-    pub sub_classification: String,
-    pub sub_category: String,
-}
-
 fn confirm_output_info(output: &mut HashMap<&str, String>) -> Result<String, Box<dyn Error>> {
-    let mut str_input = String::new();
-    println!("TR number: {},", output.entry(&"tr_number").or_insert("".to_string()));
-    println!("Specimen ID: {},", output.entry(&"specimen_id").or_insert("".to_string()));
-    println!("Request type: {},", output.entry(&"request_type").or_insert("".to_string()));
-    println!("Test category: {}", output.entry(&"test_category").or_insert("".to_string()));
-    println!("Operator: {}", output.entry(&"operator").or_insert("".to_string()));
+    println!("TR number: {},", output.entry(&"TR_Number").or_insert("".to_string()));
+    println!("Specimen ID: {},", output.entry(&"Specimen ID").or_insert("".to_string()));
+    println!("Request type: {},", output.entry(&"Test Request type").or_insert("".to_string()));
+    println!("Test category: {}", output.entry(&"Testing_Category").or_insert("".to_string()));
+    println!("Operator: {}", output.entry(&"Technician").or_insert("".to_string()));
     print!("\nConfirm data Yes/No >>");
+    let mut str_input = String::new();
     io::stdout().flush()?;
     io::stdin().read_line(&mut str_input)
         .expect("Failed to read.");
     Ok(str_input)
 }
+
+fn append_file(path: PathBuf, text: String) -> Result<(), Box<dyn Error>> {
+    let display = path.display();
+    let mut file = match fs::OpenOptions::new().append(true).create(true).open(&path) {
+        Err(why) => panic!("couldn't create {}: {}", display, why.description()),
+        Ok(file) => file,
+    };
+
+    match file.write_all(text.as_bytes()) {
+        Err(why) => panic!("couldn't write to {}: {}", display, why.description()),
+        Ok(_) => println!("successfully wrote to {}", display),
+    }
+    Ok(())
+}
+
+
 
 pub fn user_inputs(config: Config, mut output: HashMap<&str, String>) -> Result<HashMap<&str, String>, Box<dyn Error>> {
 
@@ -321,18 +423,21 @@ pub fn user_inputs(config: Config, mut output: HashMap<&str, String>) -> Result<
     let answer = answer.trim().to_lowercase().clone();
     println!("Answer: {}", &answer);
     match  answer.as_ref() {
-        "yes" | "y" => return Ok(output),
+        "yes" | "y" => {
+            return Ok(output)},
         _ => (),
     }
 
     loop {
+        output.insert("opened_window", "Yes".to_string());
+
         let mut str_input = String::new();
         println!("Write TR number:");
         print!(">>");
         io::stdout().flush()?;
         io::stdin().read_line(&mut str_input)
             .expect("Failed to read TR number");
-        output.insert("tr_number", str_input.trim().to_string());
+        output.insert(&"TR_Number", str_input.trim().to_string());
 
         let mut str_input = String::new();
         println!("\nWrite Specimen ID:");
@@ -340,24 +445,24 @@ pub fn user_inputs(config: Config, mut output: HashMap<&str, String>) -> Result<
         io::stdout().flush()?;
         io::stdin().read_line(&mut str_input)
                 .expect("Failed to read Specimen ID");
-        output.insert("specimen_id", str_input.trim().to_string());
+        output.insert(&"Specimen ID", str_input.trim().to_string());
 
         println!("\nChoose request type:");
         let path = config.get_config_file_path(&config.test_request_type_cfg);
         let test_request = TestInfo::new(&path)?;
-        output.insert("request_type", test_request.choose_value()?);
+        output.insert(&"Test Request type", test_request.choose_value()?);
 
         println!("\nChoose test category:");
         let path = config.get_config_file_path(&config.test_category_cfg);
         let test_category = TestCategory::new(&path)?;
         let (category, time) = test_category.choose_value()?;
         output.insert("test_category", category.to_owned());
-        output.insert("avalaible_time", time.to_owned());
+        output.insert(&"Available Time", time.to_owned());
 
         println!("\nChoose operator:");
         let path = config.get_config_file_path(&config.operator_list_cfg);
         let test_operator = TestInfo::new(&path)?;
-        output.insert("operator", test_operator.choose_value()?);
+        output.insert(&"Technician", test_operator.choose_value()?);
 
         println!("\nCheck values:");
         let answer = confirm_output_info(&mut output)?;
@@ -369,8 +474,101 @@ pub fn user_inputs(config: Config, mut output: HashMap<&str, String>) -> Result<
             _ => continue,
         }
     }
-
+    output.insert("opened_window", "No".to_string());
     Ok(output)
+}
+
+fn write_continue(config: &Config) -> Result<(), Box<dyn Error>> {
+    let local: DateTime<Local> = Local::now();
+    let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
+    let text = format!("OUT::{}::Test Stopped::Select::Running Continuous\n", date_string);
+
+    let filename = config.get_log_file_path(local)?;
+    append_file(filename, text)?;
+    Ok(())
+}
+
+fn write_test_end(config: &Config) -> Result<(), Box<dyn Error>> {
+    let local: DateTime<Local> = Local::now();
+    let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
+    let text = format!("OUT::{}::Test Stopped::Test Completed::none\n", date_string);
+
+    let filename = config.get_log_file_path(local)?;
+    append_file(filename, text)?;
+    Ok(())
+}
+
+fn write_test_loss(config: &Config, data: Vec<String>) -> Result<(), Box<dyn Error>> {
+    let local: DateTime<Local> = Local::now();
+    let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
+    let text = format!("IN::{}::{}::{}::{}\n", date_string, data[0], data[1], data[2]);
+
+    let filename = config.get_log_file_path(local)?;
+    append_file(filename, text)?;
+    Ok(())
+}
+
+pub fn write_test_loss_end(config: &Config, data: Vec<String>) -> Result<(), Box<dyn Error>> {
+    let local: DateTime<Local> = Local::now();
+    let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
+    let text = format!("OUT::{}::{}::{}::{}\n", date_string, data[0], data[1], data[2]);
+
+    let filename = config.get_log_file_path(local)?;
+    append_file(filename, text)?;
+    Ok(())
+}
+
+pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>) -> Result<(), Box<dyn Error>> {
+    println!("\nEnd of test or continue? (End/Con):");
+    let mut str_input = String::new();
+    io::stdout().flush()?;
+    io::stdin().read_line(&mut str_input)
+        .expect("Failed to read.");
+    let answer = str_input;
+    let answer = answer.trim().to_lowercase().clone();
+    println!("Answer: {}", &answer);
+    let _res = match  answer.as_ref() {
+        "con" | "c" => write_continue(&config),
+        "end" | "e" => {
+            write_test_end(&config)?;
+            let out = testloose_inputs(&config, output)?;
+            write_test_loss(&config, out)
+        },
+        _ => Ok(()),
+    };
+    Ok(())
+}
+
+pub fn testloose_inputs(config: &Config, output: &mut HashMap<&str, String>) -> Result<Vec<String>, Box<dyn Error>> {
+
+    loop {
+        output.insert("opened_window", "Yes".to_string());
+        println!("\nChoose time loss clasification:");
+        let path = config.get_config_file_path(&config.timeloss_classification_cfg);
+        let test_request = TestLossClass::new(&path)?;
+        let testclass = test_request.choose_value()?;
+
+        println!("\nCheck values:");
+        println!("Time loss classification: {}", testclass[0]);
+        println!("Time loss sub classification: {}", testclass[1]);
+        println!("Time loss sub category: {}", testclass[0]);
+
+        let mut str_input = String::new();
+        print!("\nConfirm data Yes/No >>");
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut str_input)
+            .expect("Failed to read.");
+        let answer = str_input.trim().to_lowercase().clone();
+        println!("Answer: {}", &answer);
+        match  answer.as_ref() {
+            "yes" | "y" => {
+                output.insert("opened_window", "No".to_string());
+                return Ok(testclass);
+            },
+            "no" | "n" => continue,
+            _ => continue,
+        }
+    }
 }
 
 
