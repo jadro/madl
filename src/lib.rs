@@ -8,6 +8,7 @@ use std::{fs, path};
 use std::fs::File;
 use std::io::prelude::*;
 use std::io;
+use std::sync::mpsc;
 use structopt::StructOpt;
 use std::path::PathBuf;
 use chrono::{DateTime, Local};
@@ -27,34 +28,6 @@ pub struct Cli {
         //long = "cell",
         help="Test cell number")]
     pub cell: u8,
-
-    /// Define test setup
-    #[structopt(short = "d",
-        long = "define",
-        help="Define TR parameters")
-    ]
-    pub define: bool,
-
-    /// Start of test duration measurement
-    #[structopt(short = "s",
-        long = "start",
-        help="Start of test duration measurement")
-    ]
-    pub start: bool,
-
-    /// End of test duration measurement
-    #[structopt(short = "e",
-        long = "end",
-        help="End of test duration measurement")
-    ]
-    pub end: bool,
-
-    /// Change time loss classification
-    #[structopt(short = "c",
-        long = "change",
-        help="Change time loss classification")
-    ]
-    pub change_timeloss: bool,
 }
 
 ///State of measurement from last line in log
@@ -107,7 +80,7 @@ impl DefFile {
     }
 
     // if temp file exist modify output from him if not return w/o change
-    pub fn read_temp_output<'a>(&self, output: &'a mut HashMap<&'a str, String>) -> std::io::Result<&'a mut HashMap<&'a str, String>> {
+    pub fn read_temp_output<'a>(&self, mut output: HashMap<&'a str, String>) -> std::io::Result<HashMap<&'a str, String>> {
         //println!("{:?}", self.path);
         if self.path.exists() {
             let file = File::open(&self.path)?;
@@ -213,16 +186,16 @@ fn last_modified_log(current_dir: &path::PathBuf) -> Result<path::PathBuf, Box<d
 }
 
 /// Initialize output with data from log file
-pub fn init_output<'a>(config: &Config, output: HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
+pub fn init_output<'a>(config: &Config, output: &HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
     let dirpath = config.get_log_dir_path();
     match last_modified_log(&dirpath) {
         Ok(file_path) => {
-            let output = get_log_data(file_path, output)?;
+            let output = get_log_data(file_path, output.to_owned())?;
             return Ok(output);
         },
         Err(e) => {
             eprintln!("Empty dir or no file: {:?}\nError {:?}", &dirpath, e);
-            return Ok(output);
+            return Ok(output.to_owned());
         },
     }
 }
@@ -267,8 +240,16 @@ impl TestInfo {
             io::stdout().flush()?;
             io::stdin().read_line(&mut str_input)
                     .expect("Failed to read line!");
+            let lenght: usize = self.values.len();
             match str_input.trim().parse::<usize>() {
-                Ok(num) => return Ok(self.values[num].to_owned()),
+                Ok(num) => {
+                    if num <= lenght {
+                        return Ok(self.values[num].to_owned());
+                    } else {
+                        println!("Inserted wrong number: {}, please insert again!\n", str_input);
+                        continue;
+                    }
+                },
                 Err(e) => {
                     println!("Inserted wrong value: {}, please insert again!\n{:?}\n", str_input, e);
                     continue;
@@ -319,10 +300,16 @@ impl TestCategory {
             io::stdout().flush()?;
             io::stdin().read_line(&mut str_input)
                     .expect("Failed to read input.");
+            let lenght: usize = self.values.len();
             match str_input.trim().parse::<usize>() {
                 Ok(num) => {
-                    let (key, val) = self.values.iter().nth(num).unwrap();
-                    return Ok((key, val));
+                    if num <= lenght {
+                        let (key, val) = self.values.iter().nth(num).unwrap();
+                        return Ok((key, val));
+                    } else {
+                        println!("Inserted wrong number: {}, please insert again!\n", str_input);
+                        continue;
+                    }
                 },
                 Err(e) => {
                     println!("Inserted wrong value: {}, please insert again!\n{:?}\n", str_input, e);
@@ -380,8 +367,16 @@ impl TestLossClass {
             io::stdout().flush()?;
             io::stdin().read_line(&mut str_input)
                     .expect("Failed to read Input");
+            let lenght: usize = values.len();
             match str_input.trim().parse::<usize>() {
-                Ok(num) => return Ok(values[num].to_owned()),
+                Ok(num) => {
+                    if num <= lenght {
+                        return Ok(values[num].to_owned());
+                    } else {
+                        println!("Inserted wrong number: {}, please insert again!\n", str_input);
+                        continue;
+                    }
+                },
                 Err(e) => {
                     println!("Inserted wrong value: {}, please insert again!\n{:?}\n", str_input, e);
                     continue;
@@ -442,6 +437,8 @@ pub struct Config {
     pub user_data_cfg: path::PathBuf,
     pub user_preference_cfg: path::PathBuf,
     pub temp_file: path::PathBuf,
+    pub tc_root_folder: path::PathBuf,
+    pub tc_log_folder: path::PathBuf,
 }
 
 impl Config {
@@ -473,6 +470,10 @@ impl Config {
         let log_file_path = dir_path.join(filename);
         //println!("Log file path: {:?}", log_file_path);
         Ok(log_file_path)
+    }
+
+    pub fn get_tc_log_folder_path(&self) -> path::PathBuf {
+        self.tc_root_folder.join(&self.tc_log_folder)
     }
 }
 
@@ -515,12 +516,11 @@ fn append_file(path: PathBuf, text: String) -> () {
 }
 
 /// Get user input for test definition
-pub fn user_inputs<'a>(config: &Config, mut output: &'a mut HashMap<&'a str, String>) -> Result<&'a mut HashMap<&'a str, String>, Box<dyn Error>> {
+pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
 
     println!("\nUse previous values?:");
     let answer = confirm_output_info(&mut output)?;
     let answer = answer.trim().to_lowercase().clone();
-    println!("Answer: {}", &answer);
     match  answer.as_ref() {
         "yes" | "y" => {
             return Ok(output)},
@@ -566,7 +566,6 @@ pub fn user_inputs<'a>(config: &Config, mut output: &'a mut HashMap<&'a str, Str
         println!("\nCheck values:");
         let answer = confirm_output_info(&mut output)?;
         let answer = answer.trim().to_lowercase().clone();
-        println!("Answer: {}", &answer);
         match  answer.as_ref() {
             "yes" | "y" => break,
             "no" | "n" => continue,
@@ -629,7 +628,7 @@ pub fn write_test_loss(config: &Config, data: Vec<String>) -> Result<(), Box<dyn
 }
 
 /// Write test loss end log line
-pub fn write_test_loss_end(config: &Config, data: Vec<String>) -> Result<(), Box<dyn Error>> {
+pub fn write_test_loss_end(config: &Config, data: &Vec<String>) -> Result<(), Box<dyn Error>> {
     write_log_line(config, vec!("OUT", &data[0], &data[1], &data[2]))
 }
 
@@ -642,7 +641,7 @@ fn test_end_input(config: &Config) -> Result<String, Box<dyn Error>> {
     Ok(out)
 }
 
-pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss_skip: bool) -> Result<(), Box<dyn Error>> {
+pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss_skip: bool) -> Result<bool, Box<dyn Error>> {
     loop {
         println!("\nEnd of test or continue? (End/Con):");
         print!(">>");
@@ -652,9 +651,11 @@ pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss
             .expect("Failed to read.");
         let answer = str_input;
         let answer = answer.trim().to_lowercase().clone();
-        println!("Answer: {}", &answer);
         let _res = match  answer.as_ref() {
-            "con" | "c" => return write_continue(&config),
+            "con" | "c" => {
+                write_continue(&config).unwrap();
+                return Ok(true)
+            },
             "end" | "e" => {
                 let end_reson = test_end_input(&config)?;
                 write_test_end(&config, end_reson)?;
@@ -662,7 +663,7 @@ pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss
                     let out = testloose_inputs(&config, output)?;
                     write_test_loss(&config, out)?;
                 }
-                return Ok(())
+                return Ok(false)
             },
             _ => {
                 println!("Inserted wrong value, please insert again!");
@@ -692,7 +693,6 @@ pub fn testloose_inputs(config: &Config, output: &mut HashMap<&str, String>) -> 
         io::stdin().read_line(&mut str_input)
             .expect("Failed to read.");
         let answer = str_input.trim().to_lowercase().clone();
-        println!("Answer: {}", &answer);
         match  answer.as_ref() {
             "yes" | "y" => {
                 output.insert("opened_window", "No".to_string());
@@ -704,36 +704,38 @@ pub fn testloose_inputs(config: &Config, output: &mut HashMap<&str, String>) -> 
     }
 }
 
-fn watch_folder(config: Config, folder: PathBuf) -> () {
-    let mut hotwatch = Hotwatch::new().expect("hotwatch failed to initialize!");
-    hotwatch.watch(folder, |event: Event| {
-        if let Event::Write(path) = event {
-            println!("{:?} changed!", path);
-        }
-    }).expect("failed to watch file!");
-    ()
-}
-
-enum TC_state {
+pub enum TcState {
     Start(String),
     End(String),
     Empty,
 }
 
-fn read_tc_log(path: PathBuf) -> TC_state {
+pub fn watch_folder(folder: PathBuf, tx: mpsc::Sender<TcState>) -> () {
+    println!("Started watch folder");
+    let mut hotwatch = Hotwatch::new().expect("hotwatch failed to initialize!");
+    hotwatch.watch(folder, move |event: Event| {
+        if let Event::Write(path) = event {
+            println!("{:?} changed!", path);
+            tx.send(read_tc_log(path)).unwrap();
+        }
+    }).expect("failed to watch file!");
+    ()
+}
+
+pub fn read_tc_log(path: PathBuf) -> TcState {
     let file = File::open(path).unwrap();
     let rev_lines = RevLines::new(io::BufReader::new(file)).unwrap();
 
     for line in rev_lines {
         if line.contains("Test_start") {
-            return TC_state::Start(line);
+            return TcState::Start(line);
         } else if line.contains("Test_end") {
-            return TC_state::End(line);
+            return TcState::End(line);
         } else {
             continue;
         }
     }
-    TC_state::Empty
+    TcState::Empty
 }
 
 
@@ -745,7 +747,7 @@ mod tests {
     fn test_config() {
         let config = Config {
             settings_dir: PathBuf::from("C:\\Utilization Tool"),
-            teststand_dir: PathBuf::from("Teststand1"),
+            teststand_dir: PathBuf::from(format!("Teststand{}", 1)),
             flag_dir: PathBuf::from("Utilization Flag"),
             log_dir: PathBuf::from("Utilization Log"),
             config_dir: PathBuf::from("Utilization Config"),
@@ -758,6 +760,8 @@ mod tests {
             user_data_cfg: PathBuf::from("User data.cfg"),
             user_preference_cfg: PathBuf::from("User preference.cfg"),
             temp_file: PathBuf::from("madl_temporary_file.txt"),
+            tc_root_folder: PathBuf::from("c:\\TCRoot"),
+            tc_log_folder: PathBuf::from(format!("station{}\\logs", 1)),
         };
         assert_eq!(config.get_config_file_path(&config.operator_list_cfg), PathBuf::from("C:\\Utilization Tool\\Teststand1\\Utilization Config\\Operator List.cfg"));
     }
