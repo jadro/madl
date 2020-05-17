@@ -16,6 +16,7 @@ use std::collections::{HashSet, HashMap, BTreeMap};
 use std::io::ErrorKind;
 use hotwatch::{Hotwatch, Event};
 use rev_lines::RevLines;
+use serde::{Serialize, Deserialize};
 
 
 #[derive(StructOpt)]
@@ -73,9 +74,9 @@ impl DefFile {
     }
 
     ///Write output data to temp file
-    pub fn write_temp_output(&self, output: &HashMap<&str, String>) -> std::io::Result<()> {
+    pub fn write_temp_output(&self, output: &HashMap<&str, String>) -> Result<(), Box<dyn Error>> {
         let f = fs::OpenOptions::new().write(true).create(true).open(&self.path)?;
-        serde_json::to_writer(f, output)?;
+        serde_yaml::to_writer(f, output)?;
         Ok(())
     }
 
@@ -85,7 +86,7 @@ impl DefFile {
         if self.path.exists() {
             let file = File::open(&self.path)?;
             let reader = io::BufReader::new(file);
-            let value: HashMap<String, String>  = match serde_json::from_reader(reader) {
+            let value: HashMap<String, String>  = match serde_yaml::from_reader(reader) {
                 Ok(val) => val,
                 Err(_) => return Ok(output),
             };
@@ -95,6 +96,43 @@ impl DefFile {
         }
         Ok(output)
     }
+}
+
+/// Create config file structure if was not defined before
+pub fn create_config_files(config: &Config) -> () {
+    let dir = config.settings_dir
+            .join(&config.teststand_dir)
+            .join(&config.config_dir);
+    let log_dir = config.get_log_dir_path();
+    let flag_dir = config.settings_dir
+            .join(&config.teststand_dir)
+            .join(&config.flag_dir);
+
+    for d in vec!(&dir, &log_dir, &flag_dir) {
+        if !d.exists() {
+            match fs::create_dir_all(&d) {
+                Ok(_) => d,
+                Err(ref error) if error.kind() == ErrorKind::AlreadyExists => d,
+                Err(error) => {
+                    panic!(
+                        "There was a problem create dir structure for config files: {:?}",
+                        error
+                    )
+                },
+            };
+        };
+
+        TestInfo::create_empty(dir.join(&config.operator_list_cfg)).unwrap();
+        TestInfo::create_empty(dir.join(&config.test_bench_id_cfg)).unwrap();
+        TestCategory::create_empty(dir.join(&config.test_category_cfg)).unwrap();
+        TestInfo::create_empty(dir.join(&config.test_request_type_cfg)).unwrap();
+        TestInfo::create_empty(dir.join(&config.test_stop_reason_list_cfg)).unwrap();
+        TestLossClass::create_empty(dir.join(&config.timeloss_classification_cfg)).unwrap();
+        TestInfo::create_empty(dir.join(&config.user_data_cfg)).unwrap();
+        TestInfo::create_empty(dir.join(&config.user_preference_cfg)).unwrap();
+    };
+
+    ()
 }
 
 /// Check state from last line in log file. (If measurement started or etc.)
@@ -135,6 +173,9 @@ pub fn parse_config(raw_string: &str) -> Vec<Vec<String>> {
 pub fn get_log_data(fpath: path::PathBuf, mut output: HashMap<&str, String>) -> Result<HashMap<&str, String>, Box<dyn Error>> {
     //println!("file path for output: {:?}", fpath);
     let mut keys: HashSet<&str> = output.keys().map(|e| *e).collect();
+    if !fpath.exists() {
+        return Ok(output);
+    }
     let contents = read_text_file(&fpath)?;
 
     for (l, line) in contents.lines().rev().enumerate() {
@@ -158,9 +199,11 @@ pub fn get_log_data(fpath: path::PathBuf, mut output: HashMap<&str, String>) -> 
 }
 
 /// Get last modified log path
-fn last_modified_log(current_dir: &path::PathBuf) -> Result<path::PathBuf, Box<dyn Error>> {
+fn last_modified_log(config: &Config, current_dir: &path::PathBuf) -> Result<path::PathBuf, Box<dyn Error>> {
     //println!("Entries modified in the last 24 hours in {:?}:", current_dir);
-    let mut out: path::PathBuf = path::PathBuf::new();
+    let local: DateTime<Local> = Local::now();
+    let filename = config.get_log_file_path(local)?;
+    let mut out: path::PathBuf = filename;
     let mut timediff: Option<u64> = None;
 
     for entry in fs::read_dir(current_dir)? {
@@ -186,9 +229,9 @@ fn last_modified_log(current_dir: &path::PathBuf) -> Result<path::PathBuf, Box<d
 }
 
 /// Initialize output with data from log file
-pub fn init_output<'a>(config: &Config, output: &HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
+pub fn update_output<'a>(config: &Config, output: &HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
     let dirpath = config.get_log_dir_path();
-    match last_modified_log(&dirpath) {
+    match last_modified_log(config, &dirpath) {
         Ok(file_path) => {
             let output = get_log_data(file_path, output.to_owned())?;
             return Ok(output);
@@ -230,6 +273,14 @@ impl TestInfo {
         let out: Vec<String> = data[0].to_owned();
 
         Ok(TestInfo{values: out})
+    }
+
+    pub fn create_empty(path: PathBuf) -> Result<(), Box<dyn Error>> {
+        if !path.exists() {
+            let mut f = fs::OpenOptions::new().write(true).create(true).open(path)?;
+            f.write_all(b"text, text, text")?;
+        };
+        Ok(())
     }
 
     pub fn choose_value(&self) -> Result<String, Box<dyn Error>> {
@@ -291,6 +342,14 @@ impl TestCategory {
         Ok(TestCategory{values: out})
     }
 
+    pub fn create_empty(path: PathBuf) -> Result<(), Box<dyn Error>> {
+        if !path.exists() {
+            let mut f = fs::OpenOptions::new().write(true).create(true).open(path)?;
+            f.write_all(b"performance*8, endurance*16, fatiuque*24")?;
+        };
+        Ok(())
+    }
+
     pub fn choose_value(&self) -> Result<(&String, &String), Box<dyn Error>> {
 
         loop {
@@ -349,6 +408,17 @@ impl TestLossClass {
         }
 
         Ok(TestLossClass{values: level2})
+    }
+
+    pub fn create_empty(path: PathBuf) -> Result<(), Box<dyn Error>> {
+        if !path.exists() {
+            let mut f = fs::OpenOptions::new().write(true).create(true).open(path)?;
+            f.write_all(
+b"Planned DownTime,Maintenance of any utilities,Pump Inspection\r\n\
+Unplanned DownTime,Breakdown of utilities,Air Cool Fail\r\n\
+Idle Time,No test sample,Sample Shortage\r\n")?;
+        };
+        Ok(())
     }
 
     pub fn display_enumer(&self, values: &Vec<&String>) -> () {
@@ -422,6 +492,7 @@ impl fmt::Display for TestLossClass {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     pub settings_dir: path::PathBuf,
     pub teststand_dir: path::PathBuf,
@@ -442,6 +513,47 @@ pub struct Config {
 }
 
 impl Config {
+
+    pub fn new(stand_nm: u8) -> Result<Config, Box<dyn Error>> {
+        let filename = PathBuf::from("madl.cfg");
+        if filename.exists() {
+            return Ok(Config::read_config(filename)?)
+        } else {
+            let config = Config {
+                settings_dir: PathBuf::from("C:\\Utilization Tool"),
+                teststand_dir: PathBuf::from(format!("Teststand{}", stand_nm)),
+                flag_dir: PathBuf::from("Utilization Flag"),
+                log_dir: PathBuf::from("Utilization Log"),
+                config_dir: PathBuf::from("Utilization Config"),
+                operator_list_cfg: PathBuf::from("Operator List.cfg"),
+                test_category_cfg: PathBuf::from("Test category.cfg"),
+                test_request_type_cfg: PathBuf::from("Test Request type.cfg"),
+                test_bench_id_cfg: PathBuf::from("TestBench ID.cfg"),
+                test_stop_reason_list_cfg: PathBuf::from("TestStop Reason List.cfg"),
+                timeloss_classification_cfg: PathBuf::from("Timeloss Classification.cfg"),
+                user_data_cfg: PathBuf::from("User data.cfg"),
+                user_preference_cfg: PathBuf::from("User preference.cfg"),
+                temp_file: PathBuf::from("madl_temporary_file.txt"),
+                tc_root_folder: PathBuf::from("c:\\TCRoot"),
+                tc_log_folder: PathBuf::from(format!("station{}\\logs", stand_nm)),
+            };
+            let f = fs::OpenOptions::new().write(true).create(true).open(&filename)?;
+            serde_yaml::to_writer(f, &config)?;
+            return Ok(config);
+        }
+    }
+
+    fn read_config(path: PathBuf) -> Result<Config, Box<dyn Error>> {
+        let file = File::open(&path)?;
+        let reader = io::BufReader::new(file);
+        let config: Config = match serde_yaml::from_reader(reader) {
+            Ok(val) => val,
+            Err(_) => panic!("Cant read config file."),
+        };
+        Ok(config)
+    }
+
+
     /// Return path to configuration file
     pub fn get_config_file_path(&self, conf_file: &path::PathBuf) -> path::PathBuf {
         self.settings_dir
@@ -528,7 +640,6 @@ pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) ->
     }
 
     loop {
-        output.insert("opened_window", "Yes".to_string());
 
         let mut str_input = String::new();
         println!("Write TR number:");
@@ -572,7 +683,6 @@ pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) ->
             _ => continue,
         }
     }
-    output.insert("opened_window", "No".to_string());
     Ok(output)
 }
 
@@ -622,6 +732,11 @@ pub fn write_test_end(config: &Config, reason: String) -> Result<(), Box<dyn Err
     write_log_line(config, vec!("OUT", "Test Stopped", &reason, "none"))
 }
 
+/// Write test completed log line
+pub fn write_missing_test_end(config: &Config) -> Result<(), Box<dyn Error>> {
+    write_log_line(config, vec!("OUT", "Test Stopped", "Select", "Missing previous end of test"))
+}
+
 /// Write test loss start log line
 pub fn write_test_loss(config: &Config, data: Vec<String>) -> Result<(), Box<dyn Error>> {
     write_log_line(config, vec!("IN", &data[0], &data[1], &data[2]))
@@ -641,7 +756,7 @@ fn test_end_input(config: &Config) -> Result<String, Box<dyn Error>> {
     Ok(out)
 }
 
-pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss_skip: bool) -> Result<bool, Box<dyn Error>> {
+pub fn end_of_test(config: &Config, testloss_skip: bool) -> Result<bool, Box<dyn Error>> {
     loop {
         println!("\nEnd of test or continue? (End/Con):");
         print!(">>");
@@ -660,7 +775,7 @@ pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss
                 let end_reson = test_end_input(&config)?;
                 write_test_end(&config, end_reson)?;
                 if !testloss_skip {
-                    let out = testloose_inputs(&config, output)?;
+                    let out = testloose_inputs(&config)?;
                     write_test_loss(&config, out)?;
                 }
                 return Ok(false)
@@ -673,10 +788,9 @@ pub fn end_of_test(config: &Config, output: &mut HashMap<&str, String>, testloss
     }
 }
 
-pub fn testloose_inputs(config: &Config, output: &mut HashMap<&str, String>) -> Result<Vec<String>, Box<dyn Error>> {
+pub fn testloose_inputs(config: &Config) -> Result<Vec<String>, Box<dyn Error>> {
 
     loop {
-        output.insert("opened_window", "Yes".to_string());
         println!("\nChoose time loss clasification:");
         let path = config.get_config_file_path(&config.timeloss_classification_cfg);
         let test_request = TestLossClass::new(&path)?;
@@ -695,7 +809,6 @@ pub fn testloose_inputs(config: &Config, output: &mut HashMap<&str, String>) -> 
         let answer = str_input.trim().to_lowercase().clone();
         match  answer.as_ref() {
             "yes" | "y" => {
-                output.insert("opened_window", "No".to_string());
                 return Ok(testclass);
             },
             "no" | "n" => continue,
@@ -710,18 +823,20 @@ pub enum TcState {
     Empty,
 }
 
-pub fn watch_folder(folder: PathBuf, tx: mpsc::Sender<TcState>) -> () {
+pub fn watch_folder(folder: PathBuf) -> mpsc::Receiver<TcState> {
+    let (tx, rx) = mpsc::channel();
     println!("Started watch folder");
     let mut hotwatch = Hotwatch::new().expect("hotwatch failed to initialize!");
     hotwatch.watch(folder, move |event: Event| {
         if let Event::Write(path) = event {
-            println!("{:?} changed!", path);
+            println!("Log file: {:?} changed!", path.display());
             tx.send(read_tc_log(path)).unwrap();
         }
     }).expect("failed to watch file!");
-    ()
+    rx
 }
 
+// Detect words in line "Test_start" and "Test_end" in log file
 pub fn read_tc_log(path: PathBuf) -> TcState {
     let file = File::open(path).unwrap();
     let rev_lines = RevLines::new(io::BufReader::new(file)).unwrap();
