@@ -1,6 +1,5 @@
-use madl::{Config, user_inputs, update_output, Laststate, check_state, write_test_definition,
-    DefFile, TcState, create_config_files, write_missing_test_end,
-    end_of_test, write_test_start, write_test_loss_end, testloose_inputs, write_test_loss};
+use madl::{Config, user_inputs, update_output, Laststate, check_state,
+    DefFile, TcState, UpdateLog, create_config_files, end_of_test, testloose_inputs};
 use std::process;
 use std::collections::HashMap;
 use madl::Cli;
@@ -46,24 +45,25 @@ fn start_change_timeloss<'a>(config: &Config, output: &'a HashMap<&'a str, Strin
     let output = output.to_owned();
     let output = update_output(&config, &output).unwrap();
     let last_state = check_state(&output);
+    let updatelog = UpdateLog::new(&config, &output);
 
     match last_state {
         Laststate::IN(vec_data) => {
             if vec_data[0].contains("Test Start") {
-                end_of_test(&config, false).unwrap();
+                end_of_test(&updatelog, false).unwrap();
             } else {
-                write_test_loss_end(&config, &vec_data).unwrap();
+                updatelog.write_test_loss_end(&vec_data).unwrap();
             }
             let out = testloose_inputs(&config).unwrap();
-            write_test_loss(&config, out).unwrap();
+            updatelog.write_test_loss(out).unwrap();
         },
         Laststate::OUT(_) => {
             let out = testloose_inputs(&config).unwrap();
-            write_test_loss(&config, out).unwrap();
+            updatelog.write_test_loss(out).unwrap();
         },
         Laststate::EMPTY => {
             let out = testloose_inputs(&config).unwrap();
-            write_test_loss(&config, out).unwrap();
+            updatelog.write_test_loss(out).unwrap();
         },
     }
     output
@@ -76,6 +76,7 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
     let output = deffile.read_temp_output(output).unwrap();
     let (tx, rx) = mpsc::channel();
     let tcroot_folder = config.get_tc_log_folder_path();
+    let updatelog = UpdateLog::new(&config, &output);
     // watch_folder(tcroot_folder, tx);
 
     //println!("Checking log folder");
@@ -97,22 +98,22 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
                     Laststate::IN(ref vec_data) => {
                         if vec_data[0].contains("Test Start") {
                             println!("\n!!Last log data are from start of test!!\n");
-                            write_missing_test_end(&config).unwrap();
-                            write_test_definition(&config, &output).unwrap();
-                            write_test_start(&config).unwrap();
+                            updatelog.write_missing_test_end().unwrap();
+                            updatelog.write_test_definition().unwrap();
+                            updatelog.write_test_start().unwrap();
                         } else {
-                            write_test_loss_end(&config, &vec_data).unwrap();
-                            write_test_definition(&config, &output).unwrap();
-                            write_test_start(&config).unwrap();
+                            updatelog.write_test_loss_end(&vec_data).unwrap();
+                            updatelog.write_test_definition().unwrap();
+                            updatelog.write_test_start().unwrap();
                         }
                     }
                     Laststate::OUT(_) => {
-                        write_test_definition(&config, &output).unwrap();
-                        write_test_start(&config).unwrap();
+                        updatelog.write_test_definition().unwrap();
+                        updatelog.write_test_start().unwrap();
                     },
                     Laststate::EMPTY => {
-                        write_test_definition(&config, &output).unwrap();
-                        write_test_start(&config).unwrap();
+                        updatelog.write_test_definition().unwrap();
+                        updatelog.write_test_start().unwrap();
                     },
                 };
                 println!("Measurment started!\n");
@@ -122,12 +123,12 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
                 match last_state {
                     Laststate::IN(ref vec_data) => {
                         if vec_data[0].contains("Test Start") {
-                            if end_of_test(&config, false).unwrap() {
+                            if end_of_test(&updatelog, false).unwrap() {
                                 println!("Continue in testing");
                                 continue
                             };
                         } else {
-                            write_test_loss_end(&config, vec_data).unwrap();
+                            updatelog.write_test_loss_end(vec_data).unwrap();
                         }
                     }
                     Laststate::OUT(ref vec_data) => {

@@ -728,66 +728,80 @@ pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) ->
     Ok(output)
 }
 
+pub struct UpdateLog<'a> {
+    config: &'a Config,
+    output: &'a HashMap<&'a str, String>,
+}
+
 /// Write test definition to log file
-pub fn write_test_definition(config: &Config, output: &HashMap<&str, String>) -> Result<(), Box<dyn Error>> {
-    let text = format_output(&output);
-    let local: DateTime<Local> = Local::now();
-    let filename = config.get_log_file_path(local)?;
-    append_file(filename, text);
+impl<'a> UpdateLog<'a> {
 
-    Ok(())
-}
-
-fn write_log_line(config: &Config, text_vec: Vec<&str>) -> Result<(), Box<dyn Error>> {
-    let local: DateTime<Local> = Local::now();
-    let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
-    let mut text_iter = text_vec.iter();
-    let mut out_text: String = String::new();
-
-    out_text.push_str(text_iter.next().unwrap());
-    out_text.push_str("::");
-    out_text.push_str(&date_string);
-    for i in text_iter {
-        out_text.push_str("::");
-        out_text.push_str(i);
+    pub fn new(config: &'a Config, output: &'a HashMap<&str, String>) -> UpdateLog<'a> {
+        UpdateLog{config: config, output: output}
     }
-    out_text.push_str("\r\n");
 
-    let filename = config.get_log_file_path(local)?;
-    append_file(filename, out_text);
+    fn write_log_line(&self, text_vec: Vec<&str>) -> Result<(), Box<dyn Error>> {
+        let local: DateTime<Local> = Local::now();
+        let date_string = local.format("%d/%m/%Y %H:%M:%S").to_string();
+        let mut text_iter = text_vec.iter();
+        let mut out_text: String = String::new();
 
-    Ok(())
+        out_text.push_str(text_iter.next().unwrap());
+        out_text.push_str("::");
+        out_text.push_str(&date_string);
+        for i in text_iter {
+            out_text.push_str("::");
+            out_text.push_str(i);
+        }
+        out_text.push_str("\r\n");
+
+        let filename = self.config.get_log_file_path(local)?;
+        append_file(filename, out_text);
+
+        Ok(())
+    }
+
+    pub fn write_test_definition(&self) -> Result<(), Box<dyn Error>> {
+        let text = format_output(self.output);
+        let local: DateTime<Local> = Local::now();
+        let filename = self.config.get_log_file_path(local)?;
+        append_file(filename, text);
+
+        Ok(())
+    }
+
+    // Write TR specification and start time of testing.
+    pub fn write_test_start(&self) -> Result<(), Box<dyn Error>> {
+        self.write_log_line(vec!("IN", "Test Start"))
+    }
+
+    // Write test completed log line
+    pub fn write_test_end(&self, reason: String) -> Result<(), Box<dyn Error>> {
+        self.write_log_line(vec!("OUT", "Test Stopped", &reason, "none"))
+    }
+
+    // Write test continue log line
+    pub fn write_continue(&self) -> Result<(), Box<dyn Error>> {
+        self.write_log_line(vec!("OUT", "Test Stopped", "Select", "Running Continuous"))
+    }
+
+    // Write test completed log line
+    pub fn write_missing_test_end(&self) -> Result<(), Box<dyn Error>> {
+        self.write_log_line(vec!("OUT", "Test Stopped", "Select", "Missing previous end of test"))
+    }
+
+    // Write test loss start log line
+    pub fn write_test_loss(&self, data: Vec<String>) -> Result<(), Box<dyn Error>> {
+        self.write_log_line(vec!("IN", &data[0], &data[1], &data[2]))
+    }
+
+    // Write test loss end log line
+    pub fn write_test_loss_end(&self, data: &Vec<String>) -> Result<(), Box<dyn Error>> {
+        self.write_log_line(vec!("OUT", &data[0], &data[1], &data[2]))
+    }
+
 }
 
-// Write TR specification and start time of testing.
-pub fn write_test_start(config: &Config) -> Result<(), Box<dyn Error>> {
-    write_log_line(config, vec!("IN", "Test Start"))
-}
-
-/// Write test continue log line
-pub fn write_continue(config: &Config) -> Result<(), Box<dyn Error>> {
-    write_log_line(config, vec!("OUT", "Test Stopped", "Select", "Running Continuous"))
-}
-
-/// Write test completed log line
-pub fn write_test_end(config: &Config, reason: String) -> Result<(), Box<dyn Error>> {
-    write_log_line(config, vec!("OUT", "Test Stopped", &reason, "none"))
-}
-
-/// Write test completed log line
-pub fn write_missing_test_end(config: &Config) -> Result<(), Box<dyn Error>> {
-    write_log_line(config, vec!("OUT", "Test Stopped", "Select", "Missing previous end of test"))
-}
-
-/// Write test loss start log line
-pub fn write_test_loss(config: &Config, data: Vec<String>) -> Result<(), Box<dyn Error>> {
-    write_log_line(config, vec!("IN", &data[0], &data[1], &data[2]))
-}
-
-/// Write test loss end log line
-pub fn write_test_loss_end(config: &Config, data: &Vec<String>) -> Result<(), Box<dyn Error>> {
-    write_log_line(config, vec!("OUT", &data[0], &data[1], &data[2]))
-}
 
 fn test_end_input(config: &Config) -> Result<String, Box<dyn Error>> {
     println!("\nChoose test end reason:");
@@ -798,7 +812,7 @@ fn test_end_input(config: &Config) -> Result<String, Box<dyn Error>> {
     Ok(out)
 }
 
-pub fn end_of_test(config: &Config, testloss_skip: bool) -> Result<bool, Box<dyn Error>> {
+pub fn end_of_test(updatelog: &UpdateLog, testloss_skip: bool) -> Result<bool, Box<dyn Error>> {
     loop {
         println!("\nEnd of test or continue? (End/Con):");
         print!(">>");
@@ -810,15 +824,15 @@ pub fn end_of_test(config: &Config, testloss_skip: bool) -> Result<bool, Box<dyn
         let answer = answer.trim().to_lowercase().clone();
         let _res = match  answer.as_ref() {
             "con" | "c" => {
-                write_continue(&config).unwrap();
+                updatelog.write_continue().unwrap();
                 return Ok(true)
             },
             "end" | "e" => {
-                let end_reson = test_end_input(&config)?;
-                write_test_end(&config, end_reson)?;
+                let end_reson = test_end_input(&updatelog.config)?;
+                updatelog.write_test_end(end_reson)?;
                 if !testloss_skip {
-                    let out = testloose_inputs(&config)?;
-                    write_test_loss(&config, out)?;
+                    let out = testloose_inputs(&updatelog.config)?;
+                    updatelog.write_test_loss(out)?;
                 }
                 return Ok(false)
             },
