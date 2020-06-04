@@ -31,6 +31,7 @@ pub struct Cli {
     pub cell: u8,
 }
 
+
 ///State of measurement from last line in log
 pub enum Laststate {
     IN(Vec<String>),
@@ -38,8 +39,49 @@ pub enum Laststate {
     EMPTY,
 }
 
+
+pub enum TcState {
+    Start(String),
+    End(String),
+    Empty,
+}
+
+impl TcState {
+    // Detect words in line "Test_start" and "Test_end" in log file
+    pub fn read_log(path: PathBuf) -> TcState {
+        let file = File::open(path).unwrap();
+        let rev_lines = RevLines::new(io::BufReader::new(file)).unwrap();
+
+        for line in rev_lines {
+            if line.contains("Test_start") {
+                return TcState::Start(line);
+            } else if line.contains("Test_end") {
+                return TcState::End(line);
+            } else {
+                continue;
+            }
+        }
+        TcState::Empty
+    }
+}
+
+
+pub fn watch_folder(folder: PathBuf) -> mpsc::Receiver<TcState> {
+    let (tx, rx) = mpsc::channel();
+    println!("Started watch folder");
+    let mut hotwatch = Hotwatch::new().expect("hotwatch failed to initialize!");
+    hotwatch.watch(folder, move |event: Event| {
+        if let Event::Write(path) = event {
+            println!("Log file: {:?} changed!", path.display());
+            tx.send(TcState::read_log(path)).unwrap();
+        }
+    }).expect("failed to watch file!");
+    rx
+}
+
+
 /// Temporary definition file created with flag -d
-/// Data from file written to lag after start of measurement, flag -s
+/// Data from file written to log after start of measurement, flag -s
 pub struct DefFile {
     path: path::PathBuf,
 }
@@ -817,41 +859,11 @@ pub fn testloose_inputs(config: &Config) -> Result<Vec<String>, Box<dyn Error>> 
     }
 }
 
-pub enum TcState {
-    Start(String),
-    End(String),
-    Empty,
-}
 
-pub fn watch_folder(folder: PathBuf) -> mpsc::Receiver<TcState> {
-    let (tx, rx) = mpsc::channel();
-    println!("Started watch folder");
-    let mut hotwatch = Hotwatch::new().expect("hotwatch failed to initialize!");
-    hotwatch.watch(folder, move |event: Event| {
-        if let Event::Write(path) = event {
-            println!("Log file: {:?} changed!", path.display());
-            tx.send(read_tc_log(path)).unwrap();
-        }
-    }).expect("failed to watch file!");
-    rx
-}
 
-// Detect words in line "Test_start" and "Test_end" in log file
-pub fn read_tc_log(path: PathBuf) -> TcState {
-    let file = File::open(path).unwrap();
-    let rev_lines = RevLines::new(io::BufReader::new(file)).unwrap();
 
-    for line in rev_lines {
-        if line.contains("Test_start") {
-            return TcState::Start(line);
-        } else if line.contains("Test_end") {
-            return TcState::End(line);
-        } else {
-            continue;
-        }
-    }
-    TcState::Empty
-}
+
+
 
 
 #[cfg(test)]

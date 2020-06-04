@@ -1,5 +1,5 @@
 use madl::{Config, user_inputs, update_output, Laststate, check_state, write_test_definition,
-    DefFile, TcState, read_tc_log, create_config_files, write_missing_test_end,
+    DefFile, TcState, create_config_files, write_missing_test_end,
     end_of_test, write_test_start, write_test_loss_end, testloose_inputs, write_test_loss};
 use std::process;
 use std::collections::HashMap;
@@ -83,7 +83,7 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
     hotwatch.watch(tcroot_folder, move |event: Event| {
         if let Event::Write(path) = event {
             //println!("Log file: {:?} changed!", path.display());
-            tx.send(read_tc_log(path)).unwrap();
+            tx.send(TcState::read_log(path)).unwrap();
         }
     }).expect("failed to watch file!");
 
