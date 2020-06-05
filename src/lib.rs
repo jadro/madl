@@ -66,6 +66,70 @@ impl TcState {
 }
 
 
+pub struct TestSpec<'a> {
+    value: HashMap<&'a str, String>,
+    config: &'a Config
+}
+
+impl<'a> TestSpec<'a> {
+    pub fn new(output: HashMap<&'a str, String>, config: &'a Config) -> Self {
+        Self{value: output, config: config}
+    }
+
+    /// Check state from last line in log file. (If measurement started or etc.)
+    pub fn check_state(&self) -> Laststate {
+        let last_line = match self.value.get(&"last_line") {
+            Some(text) => text,
+            None => panic!("Not defined last line in Output HashMap!"),
+        };
+        let state_vec: Vec<String> = last_line.trim().split("::").map(String::from).collect();
+        //println!("Check_state: {:?}", state_vec);
+        match state_vec[0].as_ref() {
+            "IN" => return Laststate::IN(state_vec[2..].to_vec()),
+            "OUT" => return Laststate::OUT(state_vec[2..].to_vec()),
+            _ => return Laststate::EMPTY,
+        }
+    }
+
+    /// Initialize output with data from log file
+    pub fn update_output(&mut self) -> Result<(), Box<dyn Error>> {
+        let dirpath = self.config.get_log_dir_path();
+        match last_modified_log(self.config, &dirpath) {
+            Ok(file_path) => {
+                self.value = get_log_data(file_path, self.value.to_owned())?;
+            },
+            Err(e) => {
+                eprintln!("Empty dir or no file: {:?}\nError {:?}", &dirpath, e);
+            },
+        }
+
+        return Ok(());
+    }
+
+    pub fn get_value(&self) -> &HashMap<&str, String> {
+        &self.value
+    }
+
+}
+
+impl<'a> Default for TestSpec<'a> {
+
+    fn default() -> Self {
+        let mut output: HashMap<&'a str, String> = HashMap::new();
+        output.entry("InterlockStatus").or_default();
+        output.entry("TR_Number").or_default();
+        output.entry("Specimen ID").or_default();
+        output.entry("Test Request type").or_default();
+        output.entry("Testing_Category").or_default();
+        output.entry("Technician").or_default();
+        output.entry("Available Time").or_default();
+        output.entry("last_line").or_default();
+
+        Self{value: output, ..Default::default()}
+     }
+}
+
+
 pub fn watch_folder(folder: PathBuf) -> mpsc::Receiver<TcState> {
     let (tx, rx) = mpsc::channel();
     println!("Started watch folder");
@@ -177,20 +241,7 @@ pub fn create_config_files(config: &Config) -> () {
     ()
 }
 
-/// Check state from last line in log file. (If measurement started or etc.)
-pub fn check_state(output: &HashMap<&str, String>) -> Laststate {
-    let last_line = match output.get(&"last_line") {
-        Some(text) => text,
-        None => panic!("Not defined last line in Output HashMap!"),
-    };
-    let state_vec: Vec<String> = last_line.trim().split("::").map(String::from).collect();
-    //println!("Check_state: {:?}", state_vec);
-    match state_vec[0].as_ref() {
-        "IN" => return Laststate::IN(state_vec[2..].to_vec()),
-        "OUT" => return Laststate::OUT(state_vec[2..].to_vec()),
-        _ => return Laststate::EMPTY,
-    }
-}
+
 
 /// Read file to string and return string
 pub fn read_text_file(path: &PathBuf) -> Result<String, Box<dyn Error>> {
@@ -270,21 +321,6 @@ fn last_modified_log(config: &Config, current_dir: &path::PathBuf) -> Result<pat
     Ok(out)
 }
 
-/// Initialize output with data from log file
-pub fn update_output<'a>(config: &Config, output: &HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
-    let dirpath = config.get_log_dir_path();
-    match last_modified_log(config, &dirpath) {
-        Ok(file_path) => {
-            let output = get_log_data(file_path, output.to_owned())?;
-            return Ok(output);
-        },
-        Err(e) => {
-            eprintln!("Empty dir or no file: {:?}\nError {:?}", &dirpath, e);
-            return Ok(output.to_owned());
-        },
-    }
-}
-
 /// Format test definition
 fn format_output(output: &HashMap<&str, String>) -> String {
 
@@ -302,6 +338,23 @@ Available Time::{}\r\n",
 
     text
 }
+
+
+/// Append string to a file
+fn append_file(path: PathBuf, text: String) -> () {
+    let display = path.display();
+    let mut file = match fs::OpenOptions::new().append(true).create(true).open(&path) {
+        Err(why) => panic!("couldn't create {}: {}", display, why.to_string()),
+        Ok(file) => file,
+    };
+
+    match file.write_all(text.as_bytes()) {
+        Err(why) => panic!("couldn't write to {}: {}", display, why.to_string()),
+        Ok(_) => return (),
+    }
+}
+
+
 
 /// One line config data
 struct TestInfo {
@@ -585,6 +638,7 @@ impl Config {
         }
     }
 
+
     fn read_config(path: PathBuf) -> Result<Config, Box<dyn Error>> {
         let file = File::open(&path)?;
         let reader = io::BufReader::new(file);
@@ -631,101 +685,10 @@ impl Config {
     }
 }
 
-/// Confirm inserted data for request definition.
-fn confirm_output_info(output: &mut HashMap<&str, String>) -> Result<String, Box<dyn Error>> {
-    println!("TR number: {},", output.entry(&"TR_Number").or_insert("".to_string()));
-    println!("Specimen ID: {},", output.entry(&"Specimen ID").or_insert("".to_string()));
-    println!("Request type: {},", output.entry(&"Test Request type").or_insert("".to_string()));
-    println!("Test category: {}", output.entry(&"Testing_Category").or_insert("".to_string()));
-    println!("Operator: {}", output.entry(&"Technician").or_insert("".to_string()));
-    loop {
-        print!("\nConfirm data Yes/No >>");
-        let mut str_input = String::new();
-        io::stdout().flush()?;
-        io::stdin().read_line(&mut str_input)
-            .expect("Failed to read.");
-        match str_input.trim().to_lowercase().as_ref() {
-            "y" | "yes" => return Ok(str_input),
-            "n" | "no" => return Ok(str_input),
-            _ => {
-                println!("Inserted wrong value, please insert again!");
-                continue;
-            },
-        };
+impl<'a> Default for Config {
+    fn default() -> Self {
+        Self::new(1).unwrap()
     }
-}
-
-/// Append string to a file
-fn append_file(path: PathBuf, text: String) -> () {
-    let display = path.display();
-    let mut file = match fs::OpenOptions::new().append(true).create(true).open(&path) {
-        Err(why) => panic!("couldn't create {}: {}", display, why.description()),
-        Ok(file) => file,
-    };
-
-    match file.write_all(text.as_bytes()) {
-        Err(why) => panic!("couldn't write to {}: {}", display, why.description()),
-        Ok(_) => return (),
-    }
-}
-
-/// Get user input for test definition
-pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
-
-    println!("\nUse previous values?:");
-    let answer = confirm_output_info(&mut output)?;
-    let answer = answer.trim().to_lowercase().clone();
-    match  answer.as_ref() {
-        "yes" | "y" => {
-            return Ok(output)},
-        _ => (),
-    }
-
-    loop {
-
-        let mut str_input = String::new();
-        println!("Write TR number:");
-        print!(">>");
-        io::stdout().flush()?;
-        io::stdin().read_line(&mut str_input)
-            .expect("Failed to read TR number");
-        output.insert(&"TR_Number", str_input.trim().to_string());
-
-        let mut str_input = String::new();
-        println!("\nWrite Specimen ID:");
-        print!(">>");
-        io::stdout().flush()?;
-        io::stdin().read_line(&mut str_input)
-                .expect("Failed to read Specimen ID");
-        output.insert(&"Specimen ID", str_input.trim().to_string());
-
-        println!("\nChoose request type:");
-        let path = config.get_config_file_path(&config.test_request_type_cfg);
-        let test_request = TestInfo::new(&path)?;
-        output.insert(&"Test Request type", test_request.choose_value()?);
-
-        println!("\nChoose test category:");
-        let path = config.get_config_file_path(&config.test_category_cfg);
-        let test_category = TestCategory::new(&path)?;
-        let (category, time) = test_category.choose_value()?;
-        output.insert("Testing_Category", category.to_owned());
-        output.insert(&"Available Time", time.to_owned());
-
-        println!("\nChoose operator:");
-        let path = config.get_config_file_path(&config.operator_list_cfg);
-        let test_operator = TestInfo::new(&path)?;
-        output.insert(&"Technician", test_operator.choose_value()?);
-
-        println!("\nCheck values:");
-        let answer = confirm_output_info(&mut output)?;
-        let answer = answer.trim().to_lowercase().clone();
-        match  answer.as_ref() {
-            "yes" | "y" => break,
-            "no" | "n" => continue,
-            _ => continue,
-        }
-    }
-    Ok(output)
 }
 
 pub struct UpdateLog<'a> {
@@ -874,8 +837,89 @@ pub fn testloose_inputs(config: &Config) -> Result<Vec<String>, Box<dyn Error>> 
 }
 
 
+/// Get user input for test definition
+pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
+
+    println!("\nUse previous values?:");
+    let answer = confirm_output_info(&mut output)?;
+    let answer = answer.trim().to_lowercase().clone();
+    match  answer.as_ref() {
+        "yes" | "y" => {
+            return Ok(output)},
+        _ => (),
+    }
+
+    loop {
+
+        let mut str_input = String::new();
+        println!("Write TR number:");
+        print!(">>");
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut str_input)
+            .expect("Failed to read TR number");
+        output.insert(&"TR_Number", str_input.trim().to_string());
+
+        let mut str_input = String::new();
+        println!("\nWrite Specimen ID:");
+        print!(">>");
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut str_input)
+                .expect("Failed to read Specimen ID");
+        output.insert(&"Specimen ID", str_input.trim().to_string());
+
+        println!("\nChoose request type:");
+        let path = config.get_config_file_path(&config.test_request_type_cfg);
+        let test_request = TestInfo::new(&path)?;
+        output.insert(&"Test Request type", test_request.choose_value()?);
+
+        println!("\nChoose test category:");
+        let path = config.get_config_file_path(&config.test_category_cfg);
+        let test_category = TestCategory::new(&path)?;
+        let (category, time) = test_category.choose_value()?;
+        output.insert("Testing_Category", category.to_owned());
+        output.insert(&"Available Time", time.to_owned());
+
+        println!("\nChoose operator:");
+        let path = config.get_config_file_path(&config.operator_list_cfg);
+        let test_operator = TestInfo::new(&path)?;
+        output.insert(&"Technician", test_operator.choose_value()?);
+
+        println!("\nCheck values:");
+        let answer = confirm_output_info(&mut output)?;
+        let answer = answer.trim().to_lowercase().clone();
+        match  answer.as_ref() {
+            "yes" | "y" => break,
+            "no" | "n" => continue,
+            _ => continue,
+        }
+    }
+    Ok(output)
+}
 
 
+/// Confirm inserted data for request definition.
+fn confirm_output_info(output: &mut HashMap<&str, String>) -> Result<String, Box<dyn Error>> {
+    println!("TR number: {},", output.entry(&"TR_Number").or_insert("".to_string()));
+    println!("Specimen ID: {},", output.entry(&"Specimen ID").or_insert("".to_string()));
+    println!("Request type: {},", output.entry(&"Test Request type").or_insert("".to_string()));
+    println!("Test category: {}", output.entry(&"Testing_Category").or_insert("".to_string()));
+    println!("Operator: {}", output.entry(&"Technician").or_insert("".to_string()));
+    loop {
+        print!("\nConfirm data Yes/No >>");
+        let mut str_input = String::new();
+        io::stdout().flush()?;
+        io::stdin().read_line(&mut str_input)
+            .expect("Failed to read.");
+        match str_input.trim().to_lowercase().as_ref() {
+            "y" | "yes" => return Ok(str_input),
+            "n" | "no" => return Ok(str_input),
+            _ => {
+                println!("Inserted wrong value, please insert again!");
+                continue;
+            },
+        };
+    }
+}
 
 
 

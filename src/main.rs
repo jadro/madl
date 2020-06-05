@@ -1,4 +1,4 @@
-use madl::{Config, user_inputs, update_output, Laststate, check_state,
+use madl::{Config, user_inputs, Laststate, TestSpec,
     DefFile, TcState, UpdateLog, create_config_files, end_of_test, testloose_inputs};
 use std::process;
 use std::collections::HashMap;
@@ -24,11 +24,12 @@ fn init_output<'a>() -> HashMap<&'a str, String> {
     output
 }
 
-fn start_test_definition<'a>(config: &Config, output: &'a HashMap<&'a str, String>) -> HashMap<&'a str, String> {
-    let output = output.to_owned();
-    let output = update_output(&config, &output).unwrap();
+fn start_test_definition<'a>(config: &'a Config, output: &'a HashMap<&'a str, String>) {
+    let mut testspec = TestSpec::new(output.to_owned(), config);
+    testspec.update_output().unwrap();
+    let output = testspec.get_value();
     let deffile = DefFile::new(&config);
-    let output =  deffile.read_temp_output(output).unwrap();
+    let output =  deffile.read_temp_output(output.to_owned()).unwrap();
     let output = match user_inputs(&config, output) {
         Err(e) => {
             eprintln!("Application error: {}", e);
@@ -37,14 +38,14 @@ fn start_test_definition<'a>(config: &Config, output: &'a HashMap<&'a str, Strin
         Ok(val) => val,
     };
     deffile.write_temp_output(&output).unwrap();
-
-    output
 }
 
-fn start_change_timeloss<'a>(config: &Config, output: &'a HashMap<&'a str, String>) -> HashMap<&'a str, String> {
-    let output = output.to_owned();
-    let output = update_output(&config, &output).unwrap();
-    let last_state = check_state(&output);
+fn start_change_timeloss<'a>(config: &'a Config, output: &'a HashMap<&'a str, String>) {
+    let mut testspec = TestSpec::new(output.to_owned(), config);
+    testspec.update_output().unwrap();
+    let output = testspec.get_value();
+
+    let last_state = testspec.check_state();
     let updatelog = UpdateLog::new(&config, &output);
 
     match last_state {
@@ -66,17 +67,17 @@ fn start_change_timeloss<'a>(config: &Config, output: &'a HashMap<&'a str, Strin
             updatelog.write_test_loss(out).unwrap();
         },
     }
-    output
 }
 
 // Get definition of test
-fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, String>) -> HashMap<&'a str, String> {
+fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, String>) {
     let output = output.to_owned();
     let deffile = DefFile::new(&config);
     let output = deffile.read_temp_output(output).unwrap();
     let (tx, rx) = mpsc::channel();
     let tcroot_folder = config.get_tc_log_folder_path();
     let updatelog = UpdateLog::new(&config, &output);
+
     // watch_folder(tcroot_folder, tx);
 
     //println!("Checking log folder");
@@ -89,8 +90,10 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
     }).expect("failed to watch file!");
 
     for received in rx {
-        let output = update_output(&config, &output).unwrap();
-        let last_state = check_state(&output);
+        let mut testspec = TestSpec::new(output.to_owned(), &config);
+        testspec.update_output().unwrap();
+        testspec.get_value();
+        let last_state = testspec.check_state();
 
         match received {
             TcState::Start(_) => {
@@ -146,8 +149,6 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
             },
         };
     }
-
-    output
 }
 
 fn main() {
