@@ -1,5 +1,5 @@
 use madl::{Config, user_inputs, Laststate, TestSpec,
-    DefFile, TcState, UpdateLog, create_config_files, end_of_test, testloose_inputs};
+    TcState, UpdateLog, create_config_files, end_of_test, testloose_inputs};
 use std::process;
 use std::collections::HashMap;
 use madl::Cli;
@@ -9,44 +9,34 @@ use std::io;
 use std::sync::mpsc;
 use hotwatch::{Hotwatch, Event};
 
-fn init_output<'a>() -> HashMap<&'a str, String> {
-    // last_line - is last line from log to check last status
-    let mut output: HashMap<&'a str, String> = HashMap::new();
-    output.entry("InterlockStatus").or_default();
-    output.entry("TR_Number").or_default();
-    output.entry("Specimen ID").or_default();
-    output.entry("Test Request type").or_default();
-    output.entry("Testing_Category").or_default();
-    output.entry("Technician").or_default();
-    output.entry("Available Time").or_default();
-    output.entry("last_line").or_default();
 
-    output
-}
-
-fn start_test_definition<'a>(config: &'a Config, output: &'a HashMap<&'a str, String>) {
-    let mut testspec = TestSpec::new(output.to_owned(), config);
-    testspec.update_output().unwrap();
-    let output = testspec.get_value();
-    let deffile = DefFile::new(&config);
-    let output =  deffile.read_temp_output(output.to_owned()).unwrap();
-    let output = match user_inputs(&config, output) {
+fn start_test_definition<'a>(config: &'a Config) {
+    println!("Def started");
+    let mut testspec = TestSpec::new(config);
+    testspec.update_from_log().unwrap();
+    println!("Def log update");
+    testspec.update_from_tmp().unwrap();
+    println!("Def tmp update");
+    let output = match user_inputs(&config) {
         Err(e) => {
             eprintln!("Application error: {}", e);
             process::exit(1);
         },
         Ok(val) => val,
     };
-    deffile.write_temp_output(&output).unwrap();
+    testspec.update_value(&output);
+    println!("Def value update");
+    testspec.write_temp_output().unwrap();
+    println!("Def written");
 }
 
-fn start_change_timeloss<'a>(config: &'a Config, output: &'a HashMap<&'a str, String>) {
-    let mut testspec = TestSpec::new(output.to_owned(), config);
-    testspec.update_output().unwrap();
+fn start_change_timeloss<'a>(config: &'a Config) {
+    let mut testspec = TestSpec::new(config);
+    testspec.update_from_log().unwrap();
     let output = testspec.get_value();
 
     let last_state = testspec.check_state();
-    let updatelog = UpdateLog::new(&config, &output);
+    let updatelog = UpdateLog::new(&config);
 
     match last_state {
         Laststate::IN(vec_data) => {
@@ -70,13 +60,12 @@ fn start_change_timeloss<'a>(config: &'a Config, output: &'a HashMap<&'a str, St
 }
 
 // Get definition of test
-fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, String>) {
-    let output = output.to_owned();
-    let deffile = DefFile::new(&config);
-    let output = deffile.read_temp_output(output).unwrap();
+fn test_start_measurement<'a>(config: &Config) {
+    let mut testspec = TestSpec::new(&config);
+    testspec.update_from_tmp().unwrap();
     let (tx, rx) = mpsc::channel();
     let tcroot_folder = config.get_tc_log_folder_path();
-    let updatelog = UpdateLog::new(&config, &output);
+    let updatelog = UpdateLog::new(&config);
 
     // watch_folder(tcroot_folder, tx);
 
@@ -90,9 +79,8 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
     }).expect("failed to watch file!");
 
     for received in rx {
-        let mut testspec = TestSpec::new(output.to_owned(), &config);
-        testspec.update_output().unwrap();
-        testspec.get_value();
+
+        testspec.update_from_log().unwrap();
         let last_state = testspec.check_state();
 
         match received {
@@ -102,25 +90,25 @@ fn test_start_measurement<'a>(config: &Config, output: &'a HashMap<&'a str, Stri
                         if vec_data[0].contains("Test Start") {
                             println!("\n!!Last log data are from start of test!!\n");
                             updatelog.write_missing_test_end().unwrap();
-                            updatelog.write_test_definition().unwrap();
+                            updatelog.write_test_definition(&testspec).unwrap();
                             updatelog.write_test_start().unwrap();
                         } else {
                             updatelog.write_test_loss_end(&vec_data).unwrap();
-                            updatelog.write_test_definition().unwrap();
+                            updatelog.write_test_definition(&testspec).unwrap();
                             updatelog.write_test_start().unwrap();
                         }
                     }
                     Laststate::OUT(_) => {
-                        updatelog.write_test_definition().unwrap();
+                        updatelog.write_test_definition(&testspec).unwrap();
                         updatelog.write_test_start().unwrap();
                     },
                     Laststate::EMPTY => {
-                        updatelog.write_test_definition().unwrap();
+                        updatelog.write_test_definition(&testspec).unwrap();
                         updatelog.write_test_start().unwrap();
                     },
                 };
                 println!("Measurment started!\n");
-                deffile.remove_temp_file().unwrap();
+                testspec.remove_temp_file().unwrap();
             },
             TcState::End(_) => {
                 match last_state {
@@ -163,8 +151,6 @@ fn main() {
 
     let config = Config::new(stand_nm).unwrap();
     create_config_files(&config);
-    let output = init_output();
-    //println!("{:?}", output);
 
     loop {
         println!("\nWelcome in MADL choose from options below:");
@@ -181,9 +167,9 @@ fn main() {
         let answer = answer.trim().to_lowercase().clone();
         //println!("Answer: {}", &answer);
         match  answer.as_ref() {
-            "change" | "c" => start_change_timeloss(&config, &output),
-            "define" | "d" => start_test_definition(&config, &output),
-            "start"  | "s" => test_start_measurement(&config, &output),
+            "change" | "c" => start_change_timeloss(&config),
+            "define" | "d" => start_test_definition(&config),
+            "start"  | "s" => test_start_measurement(&config),
             "exit"  | "e" => break,
             _ => {
                 println!("Inserted wrong value, please insert again!");

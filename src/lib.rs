@@ -68,12 +68,25 @@ impl TcState {
 
 pub struct TestSpec<'a> {
     value: HashMap<&'a str, String>,
-    config: &'a Config
+    config: &'a Config,
+    tmp_path: path::PathBuf,
 }
 
 impl<'a> TestSpec<'a> {
-    pub fn new(output: HashMap<&'a str, String>, config: &'a Config) -> Self {
-        Self{value: output, config: config}
+    pub fn new(config: &'a Config) -> Self {
+        println!("Test spec new started");
+        let mut output: HashMap<&'a str, String> = HashMap::new();
+        output.entry("InterlockStatus").or_default();
+        output.entry("TR_Number").or_default();
+        output.entry("Specimen ID").or_default();
+        output.entry("Test Request type").or_default();
+        output.entry("Testing_Category").or_default();
+        output.entry("Technician").or_default();
+        output.entry("Available Time").or_default();
+        output.entry("last_line").or_default();
+        let tmp_path = TestSpec::create_tmp_file(&config).unwrap();
+
+        Self{value: output, config: config, tmp_path: tmp_path}
     }
 
     /// Check state from last line in log file. (If measurement started or etc.)
@@ -92,7 +105,7 @@ impl<'a> TestSpec<'a> {
     }
 
     /// Initialize output with data from log file
-    pub fn update_output(&mut self) -> Result<(), Box<dyn Error>> {
+    pub fn update_from_log(&mut self) -> Result<(), Box<dyn Error>> {
         let dirpath = self.config.get_log_dir_path();
         match last_modified_log(self.config, &dirpath) {
             Ok(file_path) => {
@@ -106,27 +119,93 @@ impl<'a> TestSpec<'a> {
         return Ok(());
     }
 
+    /// Format test definition
+    fn formated_output(&self) -> String {
+
+        let output = &self.value;
+        let text = format!("\
+    MADL_Version::2.5\r\n\
+    InterlockStatus::Enabled\r\n\
+    TR_Number::{}\r\n\
+    Specimen ID::{}\r\n\
+    Test Request type::{}\r\n\
+    Testing_Category::{}\r\n\
+    Technician::{}\r\n\
+    Available Time::{}\r\n",
+        output[&"TR_Number"], output[&"Specimen ID"], output[&"Test Request type"],
+        output[&"Testing_Category"], output[&"Technician"], output[&"Available Time"]);
+
+        text
+    }
+
     pub fn get_value(&self) -> &HashMap<&str, String> {
         &self.value
     }
 
-}
+    fn create_tmp_file(config: &Config) -> Result<path::PathBuf, Box<dyn Error>> {
+        let mut dir = env::temp_dir();
+        dir.push(&config.teststand_dir);
+        let mut dir: path::PathBuf = match fs::create_dir(&dir) {
+            Ok(_) => dir,
+            Err(ref error) if error.kind() == ErrorKind::AlreadyExists => dir,
+            Err(error) => {
+                panic!(
+                    "There was a problem opening the file: {:?}",
+                    error
+                )
+            },
+        };
+        dir.push(&config.temp_file);
+        println!("Tmp file: {:?}", dir);
+        Ok(dir)
+    }
 
-impl<'a> Default for TestSpec<'a> {
+    /// Remove tempfile after data written to log file.
+    pub fn remove_temp_file(&self) -> Result<(), Box<dyn Error>> {
+        if self.tmp_path.exists() {
+            fs::remove_file(&self.tmp_path)?;
+            Ok(())
+        } else {
+            //eprintln!("Temp file not exist! {:?}", self.path);
+            Ok(())
+        }
+    }
 
-    fn default() -> Self {
-        let mut output: HashMap<&'a str, String> = HashMap::new();
-        output.entry("InterlockStatus").or_default();
-        output.entry("TR_Number").or_default();
-        output.entry("Specimen ID").or_default();
-        output.entry("Test Request type").or_default();
-        output.entry("Testing_Category").or_default();
-        output.entry("Technician").or_default();
-        output.entry("Available Time").or_default();
-        output.entry("last_line").or_default();
+    pub fn write_temp_output(&self) -> Result<(), Box<dyn Error>> {
+        let f = fs::OpenOptions::new().write(true).create(true).open(&self.tmp_path)?;
+        serde_yaml::to_writer(f, &self.value)?;
+        Ok(())
+    }
 
-        Self{value: output, ..Default::default()}
-     }
+    // if temp file exist modify output from him if not return w/o change
+    pub fn update_from_tmp(&mut self) -> Result<(), Box<dyn Error>> {
+        println!("From tmp: {:?}", self.tmp_path);
+        if self.tmp_path.exists() {
+            let file = File::open(&self.tmp_path)?;
+            let reader = io::BufReader::new(file);
+            let value: HashMap<String, String>  = match serde_yaml::from_reader(reader) {
+                Ok(val) => val,
+                Err(_) => return Ok(()),
+            };
+            for (i, val) in self.value.iter_mut() {
+                *val = value.get::<str>(&i).unwrap().to_string();
+            }
+        }
+        println!("Tmp reading done {:?}", &self.value);
+        Ok(())
+    }
+
+    // update value
+    pub fn update_value(&mut self, value: &HashMap<&'a str, String>) {
+        for (i, val) in self.value.iter_mut() {
+            //Todo: Solve error state
+            *val = match value.get::<str>(&i) {
+                Some(val) => val.to_string(),
+                None => continue,
+            };
+
+        }
+    }
 }
 
 
@@ -143,66 +222,6 @@ pub fn watch_folder(folder: PathBuf) -> mpsc::Receiver<TcState> {
     rx
 }
 
-
-/// Temporary definition file created with flag -d
-/// Data from file written to log after start of measurement, flag -s
-pub struct DefFile {
-    path: path::PathBuf,
-}
-
-impl DefFile {
-    pub fn new(config: &Config) -> DefFile {
-        let mut dir = env::temp_dir();
-        dir.push(&config.teststand_dir);
-        let mut dir: path::PathBuf = match fs::create_dir(&dir) {
-            Ok(_) => dir,
-            Err(ref error) if error.kind() == ErrorKind::AlreadyExists => dir,
-            Err(error) => {
-                panic!(
-                    "There was a problem opening the file: {:?}",
-                    error
-                )
-            },
-        };
-        dir.push(&config.temp_file);
-        DefFile{path: dir}
-    }
-
-    /// Remove tempfile after data written to log file.
-    pub fn remove_temp_file(&self) -> Result<(), Box<dyn Error>> {
-        if self.path.exists() {
-            fs::remove_file(&self.path)?;
-            Ok(())
-        } else {
-            //eprintln!("Temp file not exist! {:?}", self.path);
-            Ok(())
-        }
-    }
-
-    ///Write output data to temp file
-    pub fn write_temp_output(&self, output: &HashMap<&str, String>) -> Result<(), Box<dyn Error>> {
-        let f = fs::OpenOptions::new().write(true).create(true).open(&self.path)?;
-        serde_yaml::to_writer(f, output)?;
-        Ok(())
-    }
-
-    // if temp file exist modify output from him if not return w/o change
-    pub fn read_temp_output<'a>(&self, mut output: HashMap<&'a str, String>) -> std::io::Result<HashMap<&'a str, String>> {
-        //println!("{:?}", self.path);
-        if self.path.exists() {
-            let file = File::open(&self.path)?;
-            let reader = io::BufReader::new(file);
-            let value: HashMap<String, String>  = match serde_yaml::from_reader(reader) {
-                Ok(val) => val,
-                Err(_) => return Ok(output),
-            };
-            for (i, val) in output.iter_mut() {
-                *val = value.get::<str>(&i).unwrap().to_string();
-            }
-        }
-        Ok(output)
-    }
-}
 
 /// Create config file structure if was not defined before
 pub fn create_config_files(config: &Config) -> () {
@@ -319,24 +338,6 @@ fn last_modified_log(config: &Config, current_dir: &path::PathBuf) -> Result<pat
     }
 
     Ok(out)
-}
-
-/// Format test definition
-fn format_output(output: &HashMap<&str, String>) -> String {
-
-    let text = format!("\
-MADL_Version::2.5\r\n\
-InterlockStatus::Enabled\r\n\
-TR_Number::{}\r\n\
-Specimen ID::{}\r\n\
-Test Request type::{}\r\n\
-Testing_Category::{}\r\n\
-Technician::{}\r\n\
-Available Time::{}\r\n",
-    output[&"TR_Number"], output[&"Specimen ID"], output[&"Test Request type"],
-    output[&"Testing_Category"], output[&"Technician"], output[&"Available Time"]);
-
-    text
 }
 
 
@@ -693,14 +694,13 @@ impl<'a> Default for Config {
 
 pub struct UpdateLog<'a> {
     config: &'a Config,
-    output: &'a HashMap<&'a str, String>,
 }
 
 /// Write test definition to log file
 impl<'a> UpdateLog<'a> {
 
-    pub fn new(config: &'a Config, output: &'a HashMap<&str, String>) -> UpdateLog<'a> {
-        UpdateLog{config: config, output: output}
+    pub fn new(config: &'a Config) -> UpdateLog<'a> {
+        UpdateLog{config: config}
     }
 
     fn write_log_line(&self, text_vec: Vec<&str>) -> Result<(), Box<dyn Error>> {
@@ -724,8 +724,8 @@ impl<'a> UpdateLog<'a> {
         Ok(())
     }
 
-    pub fn write_test_definition(&self) -> Result<(), Box<dyn Error>> {
-        let text = format_output(self.output);
+    pub fn write_test_definition(&self, testspec: &TestSpec) -> Result<(), Box<dyn Error>> {
+        let text = testspec.formated_output();
         let local: DateTime<Local> = Local::now();
         let filename = self.config.get_log_file_path(local)?;
         append_file(filename, text);
@@ -766,15 +766,6 @@ impl<'a> UpdateLog<'a> {
 }
 
 
-fn test_end_input(config: &Config) -> Result<String, Box<dyn Error>> {
-    println!("\nChoose test end reason:");
-    let path = config.get_config_file_path(&config.test_stop_reason_list_cfg);
-    let test_end = TestInfo::new(&path)?;
-    let out = test_end.choose_value()?;
-
-    Ok(out)
-}
-
 pub fn end_of_test(updatelog: &UpdateLog, testloss_skip: bool) -> Result<bool, Box<dyn Error>> {
     loop {
         println!("\nEnd of test or continue? (End/Con):");
@@ -791,10 +782,14 @@ pub fn end_of_test(updatelog: &UpdateLog, testloss_skip: bool) -> Result<bool, B
                 return Ok(true)
             },
             "end" | "e" => {
-                let end_reson = test_end_input(&updatelog.config)?;
+                println!("\nChoose test end reason:");
+                let config = &updatelog.config;
+                let path = config.get_config_file_path(&config.test_stop_reason_list_cfg);
+                let test_end = TestInfo::new(&path)?;
+                let end_reson = test_end.choose_value()?;
                 updatelog.write_test_end(end_reson)?;
                 if !testloss_skip {
-                    let out = testloose_inputs(&updatelog.config)?;
+                    let out = testloose_inputs(&config)?;
                     updatelog.write_test_loss(out)?;
                 }
                 return Ok(false)
@@ -838,8 +833,9 @@ pub fn testloose_inputs(config: &Config) -> Result<Vec<String>, Box<dyn Error>> 
 
 
 /// Get user input for test definition
-pub fn user_inputs<'a>(config: &Config, mut output: HashMap<&'a str, String>) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
+pub fn user_inputs<'a>(config: &Config) -> Result<HashMap<&'a str, String>, Box<dyn Error>> {
 
+    let mut output: HashMap<&'a str, String> = HashMap::new();
     println!("\nUse previous values?:");
     let answer = confirm_output_info(&mut output)?;
     let answer = answer.trim().to_lowercase().clone();
